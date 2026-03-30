@@ -2,6 +2,8 @@
 
 Automatically sync highlights and notes from your Kobo e-reader to [Calibre-Web](https://github.com/janeczku/calibre-web) — triggered by the built-in Sync button on the Kobo. No extra software on the Kobo required.
 
+<img width="849" height="909" alt="Screenshot 2026-03-30 at 12 27 04 AM" src="https://github.com/user-attachments/assets/ae552aa7-69a9-45a4-b087-ba333adc8d4e" />
+
 ## How it works
 
 When you tap Sync on your Kobo, it contacts a "reading services" API to sync annotations. Normally this goes to Kobo's cloud servers (`readingservices.kobo.com`). This project redirects that traffic to a local server that:
