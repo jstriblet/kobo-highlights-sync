@@ -6,12 +6,15 @@ import unittest
 import urllib.request
 import urllib.error
 
+from annotation_store import AnnotationStore
 from server import create_server
 
 
-def _start_server(port=18787):
+def _start_server(port=18787, db_path=":memory:", annotation_store=None):
     """Start a test server on the given port and return (server, thread)."""
-    server = create_server(port=port, db_path=":memory:")
+    if annotation_store is None:
+        annotation_store = AnnotationStore(":memory:")
+    server = create_server(port=port, db_path=db_path, annotation_store=annotation_store)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread
@@ -335,6 +338,190 @@ class TestFullSync(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["highlights"], [])
         self.assertEqual(body["count"], 0)
+
+
+class TestReadingServices(unittest.TestCase):
+    """Reading services API: checkforchanges, GET/PATCH annotations."""
+
+    _SETUP_SQL = """
+        CREATE TABLE books (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            author_sort TEXT DEFAULT '',
+            uuid TEXT
+        );
+        CREATE TABLE identifiers (
+            id INTEGER PRIMARY KEY,
+            book INTEGER,
+            type TEXT DEFAULT 'isbn',
+            val TEXT
+        );
+        CREATE TABLE annotations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book INTEGER NOT NULL,
+            format TEXT NOT NULL,
+            user_type TEXT NOT NULL,
+            user TEXT NOT NULL,
+            timestamp REAL NOT NULL,
+            annot_id TEXT NOT NULL,
+            annot_type TEXT NOT NULL,
+            annot_data TEXT NOT NULL,
+            searchable_text TEXT DEFAULT ''
+        );
+        INSERT INTO books (id, title, author_sort, uuid)
+        VALUES (129, 'Empire of Silence', 'Ruocchio, Christopher',
+                'dc31e00d-e279-405d-befb-346da52b10a0');
+    """
+
+    _CONTENT_ID = "dc31e00d-e279-405d-befb-346da52b10a0"
+
+    _SAMPLE_ANNOTATION = {
+        "clientLastModifiedUtc": "2026-03-30T03:24:18Z",
+        "highlightColor": "#B2E1E8",
+        "highlightedText": "NARROW WINDOWS OF Gibson's cloister cell stood open, looking",
+        "id": "29621ba2-009e-4c85-a7f1-5a084635f889",
+        "location": {
+            "span": {
+                "chapterFilename": "OEBPS/xhtml/09_Chapter_2_Like_Distan.xhtml",
+                "chapterProgress": 0.1,
+                "chapterTitle": "Chapter 2: Like Distant Thunder",
+                "endChar": 42,
+                "endPath": "span#kobo.3.2",
+                "startChar": 3,
+                "startPath": "span#kobo.3.1",
+            }
+        },
+        "type": "highlight",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        import sqlite3
+        import tempfile
+        import os
+
+        fd, cls._db_file = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+
+        conn = sqlite3.connect(cls._db_file)
+        conn.executescript(cls._SETUP_SQL)
+        conn.close()
+
+        cls._store = AnnotationStore(":memory:")
+        cls.server, cls.thread = _start_server(
+            port=18925, db_path=cls._db_file, annotation_store=cls._store
+        )
+        cls.base = "http://127.0.0.1:18925"
+
+    @classmethod
+    def tearDownClass(cls):
+        import os
+        cls.server.shutdown()
+        os.unlink(cls._db_file)
+
+    def _request(self, method, path, body=None, headers=None):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            f"{self.base}{path}",
+            data=data,
+            headers={"Content-Type": "application/json", **(headers or {})},
+            method=method,
+        )
+        try:
+            resp = urllib.request.urlopen(req)
+            return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read()
+
+    # -- checkforchanges ---------------------------------------------------
+
+    def test_checkforchanges_returns_changed(self):
+        """POST checkforchanges returns flat array of changed ContentIds."""
+        # Seed one annotation so the store has a non-empty etag for our book
+        self._store.upsert(self._CONTENT_ID, [self._SAMPLE_ANNOTATION])
+
+        payload = [
+            {"ContentId": self._CONTENT_ID, "etag": "wrong-etag"},
+            {"ContentId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "etag": 'W/"0"'},
+        ]
+        status, headers, raw = self._request("POST", "/api/v3/content/checkforchanges", payload)
+        self.assertEqual(status, 200)
+        changed = json.loads(raw)
+        # First book has wrong etag -> changed; second has matching empty etag -> not changed
+        self.assertIn(self._CONTENT_ID, changed)
+        self.assertNotIn("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", changed)
+
+    # -- PATCH annotations -------------------------------------------------
+
+    def test_patch_annotations_stores_highlight(self):
+        """PATCH stores a highlight and returns 200 with etag."""
+        body = {"updatedAnnotations": [self._SAMPLE_ANNOTATION]}
+        status, headers, raw = self._request(
+            "PATCH",
+            f"/api/v3/content/{self._CONTENT_ID}/annotations",
+            body,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(headers.get("etag"), "Response must include etag header")
+
+    # -- GET annotations ---------------------------------------------------
+
+    def test_get_annotations_returns_stored(self):
+        """GET after PATCH returns the stored highlight."""
+        # Ensure there's data (may already exist from prior tests)
+        self._store.upsert(self._CONTENT_ID, [self._SAMPLE_ANNOTATION])
+
+        status, headers, raw = self._request(
+            "GET",
+            f"/api/v3/content/{self._CONTENT_ID}/annotations",
+        )
+        self.assertEqual(status, 200)
+        body = json.loads(raw)
+        self.assertIn("annotations", body)
+        texts = [a.get("highlightedText", "") for a in body["annotations"]]
+        self.assertIn(self._SAMPLE_ANNOTATION["highlightedText"], texts)
+
+    def test_get_annotations_304_when_unchanged(self):
+        """GET with matching If-None-Match returns 304."""
+        etag = self._store.get_etag(self._CONTENT_ID)
+        status, headers, raw = self._request(
+            "GET",
+            f"/api/v3/content/{self._CONTENT_ID}/annotations",
+            headers={"If-None-Match": etag},
+        )
+        self.assertEqual(status, 304)
+
+    # -- Calibre write-through ---------------------------------------------
+
+    def test_patch_writes_to_calibre(self):
+        """PATCH writes the highlight to Calibre's annotations table."""
+        import sqlite3
+
+        # Use a unique annotation id to avoid collisions with other tests
+        ann = dict(self._SAMPLE_ANNOTATION)
+        ann["id"] = "calibre-write-test-0001"
+        ann["highlightedText"] = "Calibre write-through test"
+
+        body = {"updatedAnnotations": [ann]}
+        status, _, _ = self._request(
+            "PATCH",
+            f"/api/v3/content/{self._CONTENT_ID}/annotations",
+            body,
+        )
+        self.assertEqual(status, 200)
+
+        # Verify in Calibre metadata.db
+        conn = sqlite3.connect(self._db_file)
+        try:
+            row = conn.execute(
+                "SELECT annot_data FROM annotations WHERE book=129 AND annot_id=?",
+                ("calibre-write-test-0001",),
+            ).fetchone()
+            self.assertIsNotNone(row, "Annotation should exist in Calibre DB")
+            data = json.loads(row[0])
+            self.assertEqual(data["highlighted_text"], "Calibre write-through test")
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":
