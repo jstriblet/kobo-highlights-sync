@@ -313,13 +313,14 @@ class _SyncHandler(BaseHTTPRequestHandler):
             # Convert each Kobo annotation to Calibre format
             calibre_annotations = []
             for ann in kobo_annotations:
-                if ann.get("type") != "highlight":
-                    continue  # Only sync highlights, not dogears
+                ann_type = ann.get("type", "")
+                if ann_type not in ("highlight", "note"):
+                    continue  # Only sync highlights and notes, not dogears
 
                 calibre_ann = kobo_to_calibre_annotation({
                     "bookmark_id": ann["id"],
                     "text": ann.get("highlightedText", ""),
-                    "annotation": None,
+                    "annotation": ann.get("noteText"),
                     "date_created": ann.get("clientLastModifiedUtc", ""),
                     "chapter_progress": ann.get("location", {}).get("span", {}).get("chapterProgress", 0),
                     "content_id": "",
