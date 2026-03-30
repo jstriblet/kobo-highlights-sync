@@ -1,0 +1,13 @@
+[Unit]
+Description=Kobo Highlights Sync Server
+After=network.target
+
+[Service]
+Type=simple
+User=striblet
+ExecStart=/usr/bin/python3 /home/striblet/src/kobo-highlights-sync/server.py --port 8787 --verbose
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
