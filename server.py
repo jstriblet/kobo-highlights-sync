@@ -143,7 +143,10 @@ _SyncHandler.do_POST = _patched_post
 # Factory
 # ---------------------------------------------------------------------------
 
-def create_server(port: int = 8787, db_path: str = "metadata.db") -> HTTPServer:
+DEFAULT_DB_PATH = "/mnt/usb/t7-1/media/books/metadata.db"
+
+
+def create_server(port: int = 8787, db_path: str = DEFAULT_DB_PATH) -> HTTPServer:
     """Create and return a configured HTTPServer (not yet started).
 
     Args:
@@ -168,9 +171,9 @@ def main():
     parser.add_argument("--port", type=int, default=8787, help="TCP port (default: 8787)")
     parser.add_argument(
         "--db",
-        default="metadata.db",
+        default=DEFAULT_DB_PATH,
         metavar="PATH",
-        help="Path to Calibre metadata.db (default: metadata.db)",
+        help="Path to Calibre metadata.db",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
