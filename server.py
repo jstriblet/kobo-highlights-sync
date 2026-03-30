@@ -217,21 +217,36 @@ class _SyncHandler(BaseHTTPRequestHandler):
             content_id = book["ContentId"]
             client_etag = book.get("etag", "")
             server_etag = store.get_etag(content_id)
-            if client_etag != server_etag:
+            # Always mark as changed if we have no stored annotations
+            # but client has some (non-zero etag). This triggers the
+            # GET → PATCH flow that populates our store.
+            has_stored = bool(store.get_annotations(content_id))
+            if not has_stored and client_etag != 'W/"0"':
+                changed.append(content_id)
+            elif client_etag != server_etag:
                 changed.append(content_id)
 
         logger.info("checkforchanges: %d/%d books have changes", len(changed), len(books))
         self._respond(200, changed)
 
     def _handle_get_annotations(self, content_id):
-        """Return stored annotations for a book."""
+        """Return stored annotations for a book.
+
+        When our store is empty but the client has annotations (non-zero etag),
+        we return 200 with empty annotations and NO etag header.  This signals
+        "server is fresh" and prompts the Kobo to PATCH its local annotations
+        up to us — without wiping its local copy.
+
+        Once we have stored annotations, we return them with a proper etag so
+        the Kobo can do normal 304-based caching.
+        """
         store = self.server.annotation_store
         annotations = store.get_annotations(content_id)
         etag = store.get_etag(content_id)
-
-        # Check If-None-Match — if etags match, return 304
         client_etag = self.headers.get("If-None-Match", "")
-        if client_etag and client_etag == etag:
+
+        # If etags match, nothing has changed — 304
+        if client_etag and client_etag == etag and annotations:
             self.send_response(304)
             self.send_header("etag", etag)
             self.end_headers()
@@ -241,7 +256,10 @@ class _SyncHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("etag", etag)
+        # Only send etag when we actually have annotations stored.
+        # Omitting the etag when empty triggers the Kobo to PATCH its data to us.
+        if annotations:
+            self.send_header("etag", etag)
         self.end_headers()
         self.wfile.write(body)
 
