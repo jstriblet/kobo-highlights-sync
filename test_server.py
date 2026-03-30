@@ -210,10 +210,17 @@ class TestFullSync(unittest.TestCase):
         cls.server.shutdown()
         os.unlink(cls._db_file)
 
-    def _post(self, body):
+    def _post(self, path_or_body, body=None):
+        if body is None:
+            # Called as _post(body) — legacy signature
+            path = "/sync"
+            body = path_or_body
+        else:
+            # Called as _post(path, body)
+            path = path_or_body
         data = json.dumps(body).encode()
         req = urllib.request.Request(
-            f"{self.base}/sync",
+            f"{self.base}{path}",
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -279,6 +286,55 @@ class TestFullSync(unittest.TestCase):
         self.assertEqual(len(body["unmatched"]), 1)
         self.assertEqual(body["unmatched"][0]["title"], "Unknown Book XYZ")
         self.assertEqual(body["unmatched"][0]["count"], 1)
+
+    def _get(self, path):
+        req = urllib.request.Request(
+            f"{self.base}{path}",
+            method="GET",
+        )
+        try:
+            resp = urllib.request.urlopen(req)
+            return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def test_get_highlights_for_book(self):
+        # First sync a highlight
+        self._post("/sync", {
+            "device_id": "kobo",
+            "highlights": [{
+                "bookmark_id": "get-test-1",
+                "text": "Test passage for GET",
+                "annotation": None,
+                "date_created": "2026-03-28T12:00:00Z",
+                "chapter_progress": 0.3,
+                "content_id": "",
+                "start_path": "",
+                "end_path": "",
+                "book_title": "Dune",
+                "book_author": "Frank Herbert",
+                "book_isbn": "9780441013593",
+            }]
+        })
+        # Then fetch
+        status, body = self._get("/highlights?book_id=1")
+        self.assertEqual(status, 200)
+        self.assertGreater(len(body["highlights"]), 0)
+        self.assertEqual(body["highlights"][0]["highlighted_text"], "Test passage for GET")
+
+    def test_get_highlights_all(self):
+        """GET /highlights without book_id returns up to 100 highlights."""
+        status, body = self._get("/highlights")
+        self.assertEqual(status, 200)
+        self.assertIn("highlights", body)
+        self.assertIn("count", body)
+
+    def test_get_highlights_unknown_book(self):
+        """GET /highlights?book_id=9999 returns empty list for unknown book."""
+        status, body = self._get("/highlights?book_id=9999")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["highlights"], [])
+        self.assertEqual(body["count"], 0)
 
 
 if __name__ == "__main__":

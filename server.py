@@ -14,6 +14,7 @@ import logging
 import sqlite3
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
 
 from matcher import match_book
 from writer import kobo_to_calibre_annotation, write_annotations
@@ -29,8 +30,11 @@ class _SyncHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def do_GET(self):  # noqa: N802
-        if self.path == "/health":
+        parsed_path = urlparse(self.path).path
+        if parsed_path == "/health":
             self._handle_health()
+        elif parsed_path == "/highlights":
+            self._handle_get_highlights()
         else:
             self._respond(404, {"status": "error", "message": "not found"})
 
@@ -51,7 +55,7 @@ class _SyncHandler(BaseHTTPRequestHandler):
         self._method_not_allowed()
 
     def _method_not_allowed(self):
-        if self.path in ("/health", "/sync"):
+        if urlparse(self.path).path in ("/health", "/sync", "/highlights"):
             self._respond(405, {"status": "error", "message": "method not allowed"})
         else:
             self._respond(404, {"status": "error", "message": "not found"})
@@ -62,6 +66,27 @@ class _SyncHandler(BaseHTTPRequestHandler):
 
     def _handle_health(self):
         self._respond(200, {"status": "ok"})
+
+    def _handle_get_highlights(self):
+        params = parse_qs(urlparse(self.path).query)
+        book_id = params.get("book_id", [None])[0]
+
+        conn = sqlite3.connect(self.server.db_path)
+        try:
+            if book_id:
+                rows = conn.execute(
+                    "SELECT annot_data FROM annotations WHERE book=? AND annot_type='highlight' ORDER BY timestamp",
+                    (int(book_id),)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT annot_data FROM annotations WHERE annot_type='highlight' ORDER BY timestamp DESC LIMIT 100"
+                ).fetchall()
+
+            highlights = [json.loads(r[0]) for r in rows]
+            self._respond(200, {"highlights": highlights, "count": len(highlights)})
+        finally:
+            conn.close()
 
     def _handle_sync(self):
         # Read body
@@ -166,7 +191,7 @@ class _SyncHandler(BaseHTTPRequestHandler):
     # Wrong-method handling for /health (GET only) and /sync (POST only)
     # We need a special case: POST to /health and GET to /sync → 405
     def do_HEAD(self):  # noqa: N802
-        if self.path in ("/health", "/sync"):
+        if urlparse(self.path).path in ("/health", "/sync", "/highlights"):
             self._respond(405, {"status": "error", "message": "method not allowed"})
         else:
             self._respond(404, {"status": "error", "message": "not found"})
