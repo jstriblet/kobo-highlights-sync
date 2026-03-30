@@ -11,7 +11,12 @@ Usage:
 import argparse
 import json
 import logging
+import sqlite3
+from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from matcher import match_book
+from writer import kobo_to_calibre_annotation, write_annotations
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +94,59 @@ class _SyncHandler(BaseHTTPRequestHandler):
             "Received %d highlight(s) from device '%s'", count, device_id
         )
 
-        # db_path is available via self.server.db_path for future use
-        self._respond(200, {"status": "ok", "received": count})
+        # Group highlights by (book_title, book_author, book_isbn)
+        groups: dict = defaultdict(list)
+        for hl in highlights:
+            key = (
+                hl.get("book_title", ""),
+                hl.get("book_author", ""),
+                hl.get("book_isbn", ""),
+            )
+            groups[key].append(hl)
+
+        results = []
+        unmatched = []
+
+        conn = sqlite3.connect(self.server.db_path)
+        try:
+            for (book_title, book_author, book_isbn), group in groups.items():
+                book_id = match_book(
+                    conn,
+                    isbn=book_isbn or None,
+                    title=book_title or None,
+                    author=book_author or None,
+                )
+                if book_id is None:
+                    unmatched.append({
+                        "title": book_title,
+                        "author": book_author,
+                        "count": len(group),
+                    })
+                    logger.warning(
+                        "No Calibre match for book '%s' by '%s'", book_title, book_author
+                    )
+                else:
+                    annotations = [kobo_to_calibre_annotation(hl) for hl in group]
+                    stats = write_annotations(conn, book_id, annotations)
+                    results.append({
+                        "book_title": book_title,
+                        "book_id": book_id,
+                        "inserted": stats["inserted"],
+                        "skipped": stats["skipped"],
+                    })
+                    logger.info(
+                        "Book '%s' (id=%d): inserted=%d skipped=%d",
+                        book_title, book_id, stats["inserted"], stats["skipped"],
+                    )
+        finally:
+            conn.close()
+
+        self._respond(200, {
+            "status": "ok",
+            "received": count,
+            "results": results,
+            "unmatched": unmatched,
+        })
 
     # ------------------------------------------------------------------
     # Helpers
